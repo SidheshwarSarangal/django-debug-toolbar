@@ -1,13 +1,15 @@
 from django.http import HttpResponseBadRequest, JsonResponse
 from django.template.loader import render_to_string
 from django.views.decorators.csrf import csrf_exempt
-
 from debug_toolbar._compat import login_not_required
 from debug_toolbar.decorators import render_with_toolbar_language, require_show_toolbar
 from debug_toolbar.forms import SignedDataForm
 from debug_toolbar.panels.sql.forms import SQLSelectForm
+from django.conf import settings
+from django.utils.translation import gettext_lazy as _
+from django.views.debug import get_default_exception_reporter_filter
 
-
+# Ensure we handle session value for the copy button
 def get_signed_data(request):
     """Unpack a signed data form, if invalid returns None"""
     data = request.GET if request.method == "GET" else request.POST
@@ -36,12 +38,19 @@ def sql_select(request):
             headers = [d[0] for d in cursor.description]
             result = cursor.fetchall()
 
+        # Handle session data for copying (increment session value)
+        if 'value' not in request.session:
+            request.session['value'] = 0  # Initialize if not set
+        request.session['value'] += 1  # Increment the value to show for copying
+
+        # Prepare context for rendering
         context = {
             "result": result,
             "sql": form.reformat_sql(),
             "duration": form.cleaned_data["duration"],
             "headers": headers,
             "alias": form.cleaned_data["alias"],
+            "session_value": request.session['value']  # Pass session value to template
         }
         content = render_to_string("debug_toolbar/panels/sql_select.html", context)
         return JsonResponse({"content": content})
@@ -65,9 +74,6 @@ def sql_explain(request):
         vendor = form.connection.vendor
         with form.cursor as cursor:
             if vendor == "sqlite":
-                # SQLite's EXPLAIN dumps the low-level opcodes generated for a query;
-                # EXPLAIN QUERY PLAN dumps a more human-readable summary
-                # See https://www.sqlite.org/lang_explain.html for details
                 cursor.execute(f"EXPLAIN QUERY PLAN {sql}", params)
             elif vendor == "postgresql":
                 cursor.execute(f"EXPLAIN ANALYZE {sql}", params)
@@ -110,8 +116,6 @@ def sql_profile(request):
                 cursor.execute("SET PROFILING=1")  # Enable profiling
                 cursor.execute(sql, params)  # Execute SELECT
                 cursor.execute("SET PROFILING=0")  # Disable profiling
-                # The Query ID should always be 1 here but I'll subselect to get
-                # the last one just in case...
                 cursor.execute(
                     """
                     SELECT *
